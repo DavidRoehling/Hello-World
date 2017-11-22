@@ -1,0 +1,510 @@
+o    h INDENT('| ') OPTION(*NODEBUGIO:*SRCSTMT)
+
+     /TITLE getProposalIMInfo
+     *=====================================================================
+     * Program runs in an environment that Shares Open Data Paths
+     *=====================================================================
+     **********************************************************************
+     * Program:     OL4194
+     * Description: getProposalIM
+     *              gets the IM information for the proposal of quote
+     *              sent in parm
+     *
+     * Parameters:
+     * · Session ID        32A Unique to each browser session
+     * · LDAP User ID      32A Derived from LDAP and passed by Java
+     * · User Full Name    50A Derived from LDAP and passed by Java
+     * · Internal User Y/N  1A Derived from LDAP and passed by Java
+     * · Agency            64A Derived from LDAP and passed by Java
+     * · Request/Action    32A This tells the Broker program what to do
+     * · Primary Key 1     10A The first key value
+     * · Primary Key 2     10A Additional key value if needed
+     * · Argument 1        32A Available parameter 1
+     * · Argument 2        32A Available parameter 2
+     * · Argument 3       256A Available parameter 3
+     * · Argument 4       256A Available parameter 4
+     * · Status             1A E,W,I,S (see note)
+     * · Error code        10A Error code for exception handling
+     * · Message          128A Detail informational message
+     *
+     *   Note: Status indicator values
+     *     E = (Error) A critical error has occurred. Request could
+     *         not be completed. (Program or Data error)
+     *     W = (Warning) An error has occurred.  Request cound not be
+     *         completed as requested. User action required.
+     *     I = (Info) Request completed successfully.  There are one
+     *         or more informational status messages.
+     *     S = (Success) Request completed successfully.
+     *         No status messages.
+     *
+     * Procedures:  GetMessage   - Set up error message
+     *
+     * Notes:
+     *        For performance reasons, this program needs to be re-entrant.
+     **********************************************************************
+
+     fpol       if   e           k disk
+
+     *=====================================================================
+     * Prototype for Input Parameters (*ENTRY replacement)
+     * Use program name in the lines below
+     *=====================================================================
+     d ol4194          pr                  extpgm('OL4194')
+     d                              946
+     d ol4194          pi
+     d  linkage                     946
+
+     *=====================================================================
+     * Prototype for Calls to External Programs
+     *=====================================================================
+     * API to Receive data from Data Queue
+     d qrcvdtaq        pr                  extpgm('QRCVDTAQ')
+     * Data Queue Name
+     d                               10
+     * Data Queue Library
+     d                               10
+     * Data Sent Length
+     d                                5  0
+     * Data Sent
+     d                             3072
+     * Wait time
+     d                                5  0
+     * Key Order
+     d                                2
+     * Data Queue Key Length
+     d                                3  0
+     * Data Queue Key
+     d                               64
+     * Sender Length
+     d                                3  0
+     * Sender ID
+     d                                1
+
+     * API to Send data to Data Queue
+     d qsnddtaq        pr                  extpgm('QSNDDTAQ')
+     * Data Queue Name
+     d                               10
+     * Data Queue Library
+     d                               10
+     * Data Sent Length
+     d                                5  0
+     * Data Sent
+     d                             3072
+     * Data Queue Key Length
+     d                                3  0
+     * Data Queue Key
+     d                               64
+
+      /define ProtoOnly
+      /include *libl/qrpgsrc,mdvalidate
+      /include *libl/qrpgsrc,mdDQANSW
+      /include *libl/qrpgsrc,mdsql
+      /include *libl/qrpgsrc,mdDecProto
+      /include *libl/qrpgsrc,mdString
+      /Include *libl/qrpgsrc,mdgetqst
+      /include *libl/qrpgsrc,mdCvtQ4Q5
+
+     *=====================================================================
+     * Prototype for Service Programs
+     *=====================================================================
+     d GetMessage      pr           128a
+     d  Code                         10    const
+     d  InvalidParm                  50    const
+
+     d IO_Error        pr           139a
+     d  Status                        5s 0 const
+     d  ErrorInfo                    50    const
+
+     *=====================================================================
+     * External Data Structures
+     *=====================================================================
+     * Enrty parameter structure
+     d ProgParms     e ds                  extname(BMBROPARMS)
+     d IMInfoDQ      e ds                  extname(DQPRPSIM)
+
+     *=====================================================================
+     * Data Structures
+     *=====================================================================
+
+     d FieldAns        ds           115
+     d   TextAns                    100    overlay(FieldAns)
+     d   NumberAns                   15s 6
+
+     d validateRet     ds           148
+     d exportData                   139    overlay(validateRet)
+     d  x_status                      1    overlay(exportData)
+     d  x_errcode                    10    overlay(exportData:*next)
+     d  x_message                   128    overlay(exportData:*next)
+     d numberC                        9    overlay(validateRet:*next)
+     d  number                        9s 0 overlay(numberC)
+
+     * Program Status Data Structure
+     DProgramStatus   sds           367
+     * Procedure Name
+     D Proc_Name         *PROC
+
+     d InlMarine       ds                  dim(30) qualified
+     D   Description                 64a
+     D   AsteriskCtrl                 1a
+     D   Question1                   12a
+     D   Question2                   12a
+     D   Connector                    3a
+     D   UseCIID                      9s 0
+
+     *=====================================================================
+     * Standalone Variables
+     *=====================================================================
+     * Data queue API fields
+     d Answer1         s             12a
+     d Answer2         s             12a
+     d @PolId          s              9s 0
+     D data            s           3072
+     D datalen         s              5  0
+     D DecEffect       s               d
+     D EntryCount      s              3p 0
+     D Found           s               n
+     D i               s              3p 0
+     D keyLen          s              3  0
+     D key             s             64
+     d keySuffix       s             32
+     d PolicyCIID      s              9s 0
+     d PolicyMnsID     s              9s 0
+     d Q5Quote         s               n
+     D quenam          s             10    inz('BMDTAQ')
+     D quelib          s             10    inz('*LIBL')
+     D SendIt          s               n
+     D SendState       s               n
+     d SkipWrite       s              1a
+     d SQLStatement    s           2048a
+     D TimeReq         s              1a
+     D Version         s              5a
+
+     * Misc fields
+
+     *=====================================================================
+     * Constants
+     *=====================================================================
+     d uc              c                   'ABCDEFGHIJKLMNOPQRSTUVWXYZ'
+     d lc              c                   'abcdefghijklmnopqrstuvwxyz'
+     d digits          c                   '0123456789'
+     d zeros           c                   '000000000'
+
+     *=====================================================================
+     * Data area for next quote #
+     *=====================================================================
+
+      /free
+       //==============================================================
+       //Main Process
+       //==============================================================
+
+          progParms  = linkage;
+          p_status   = *blank;
+          p_errcode  = *blanks;
+          p_message  = *blanks;
+          exsr ValidateParms;
+          // evalr NumberC = zeros + %trim(%subst(p_key1:1:9));
+
+          p_status  = 'S';
+          p_errcode = *blanks;
+          p_message = *blanks;
+
+          exsr getIM;
+
+          exsr endProcess;
+
+       //==============================================================
+       //SUBROUTINES:
+       //==============================================================
+
+       //==============================================================
+       //validate parms
+       //   key1 = polid
+       //==============================================================
+
+       begsr validateParms;
+
+       ValidateRet = ValidatePol(p_key1:' ':' ':' ':' ':' ');
+       exsr chkStatus;
+       @polid = number;
+       chain @PolId Pol;
+
+       endsr;
+
+       //==============================================================
+       //Move called status to program status and end program if needed
+       //It is used when receiving exportData from a called procedure
+       //==============================================================
+       begsr ChkStatus;
+
+       p_status  = x_status;
+       p_errcode = x_errcode;
+       p_message = x_message;
+
+       select;
+         when p_status = 'S' or p_status = ' ';
+         //just return to program no problem;
+         // when p_status = 'I' and endOnIStatus;
+         //  exsr endProcess;
+         when p_status = 'I';
+         //just return to program no problem;
+        other;
+          exsr endProcess;
+       endsl;
+
+       endsr;
+
+       //==============================================================
+       //Get IM items to then write DQs for
+       //==============================================================
+
+       begsr getIM;
+
+       if not mdStateParms(StId : RnwBegDt : 'm1' : 'prop' :
+                           DecEffect : TimeReq : SendState : Version);
+         Version = '';
+       endif;
+
+       exsr GetPolCIID;
+       Q5Quote = IsBrms(@PolId);
+       exsr GetList;
+
+       for i = 1 to EntryCount;
+         if not Q5Quote;
+           InlMarine(i).UseCIID = PolicyCIID;
+         endif;
+         SkipWrite = 'N';
+         FieldAns = GetFieldVal(@Polid:InlMarine(i).UseCIID:0:0:' ':
+                         InlMarine(i).Description:'Risk':%char(RnwBegDt));
+         pi_Amount = NumberAns;
+
+         // Remove leading period(.) from description if it's there
+         if %scan('.' : InlMarine(i).Description) > 0;
+            InlMarine(i).Description = %subst(InlMarine(i).Description : 2 :
+                                       %len(InlMarine(i).Description) - 1);
+         endif;
+
+         if pi_Amount = 0;
+            SkipWrite = 'Y';
+         else;
+            // Set IM description
+            exsr SetDescription;
+            if pi_Desc = 'Computer Extra Expense' or
+               pi_Desc = 'Computer Extra Expense*';
+               pi_Ded = 'N/A';
+            else;
+               FieldAns = GetFieldVal(@Polid:InlMarine(i).UseCIID:0:0:' ':
+                                      InlMarine(i).Description:'Deduction':
+                                      %char(RnwBegDt));
+               pi_Ded = %trim(TextAns);
+            endif;
+           if SkipWrite <> 'Y';
+              exsr WriteDQ;
+           endif;
+         endif;
+
+       endfor;
+
+
+       //endif;
+
+       endsr;
+
+       //==============================================================
+       // Set description field - logic to determine if Asterisk should
+       // show with description.
+       //==============================================================
+
+       begsr SetDescription;
+
+       select;
+         when InlMarine(i).AsteriskCtrl = 'N';
+           pi_Desc = InlMarine(i).Description;
+
+         when InlMarine(i).AsteriskCtrl = 'A';
+           pi_Desc = %trim(InlMarine(i).Description) + '*';
+
+         when InlMarine(i).AsteriskCtrl = '1';
+           exsr GetQuest1;
+           if %trim(Answer1) = %trim(InlMarine(i).Question1);
+             pi_Desc = %trim(InlMarine(i).Description) + '*';
+           else;
+             pi_Desc = InlMarine(i).Description;
+           endif;
+
+         when InlMarine(i).AsteriskCtrl = '2';
+           exsr GetQuest1;
+           exsr GetQuest2;
+           select;
+             when %trim(Answer1) = %trim(InlMarine(i).Question1) and
+                  %trim(Answer2) = %trim(InlMarine(i).Question2);
+               pi_Desc = %trim(InlMarine(i).Description) + '*';
+
+             when %trim(Answer1) =  %trim(InlMarine(i).Question1) and
+                  %trim(Answer2) <> %trim(InlMarine(i).Question2) and
+                  InlMarine(i).Connector = 'or';
+               pi_Desc = %trim(InlMarine(i).Description) + '*';
+
+             when %trim(Answer1) <> %trim(InlMarine(i).Question1) and
+                  %trim(Answer2) =  %trim(InlMarine(i).Question2) and
+                  InlMarine(i).Connector = 'or';
+               pi_Desc = %trim(InlMarine(i).Description) + '*';
+
+             other;
+               pi_Desc = InlMarine(i).Description;
+           endsl;
+       endsl;
+
+       endsr;
+
+       //==============================================================
+       // Set description field - logic to determine if Asterisk should
+       // show with description.
+       //==============================================================
+
+       begsr GetList;
+
+
+       exec sql
+          declare InlMarCsr cursor for InlandMarine;
+
+       select;
+         when Version = '';
+            SQLStatement =
+                'select group_name, ''N'', '' '', '' '', '' '', 0 '+
+                   'from dqans inner join '+
+                        'imcovcde on Group_Name = icimdesc inner join '+
+                        'ci on cidsc = icimdesc '+
+                   'where data_queue_column_name = ''Risk'' and '+
+                         'ictype = ''Policy'' and '+
+                         'CITypCde like ''IM%'' and  '+
+                         'PolMnsId = ? '+
+                   'order by key2';
+
+         when not Q5Quote;
+            SQLStatement =
+                'select group_name,icastr,icquest1,icquest2,icqstcon,0 '+
+                   'from dqans inner join ' +
+                        'imcovcde on Group_Name = icimdesc '+
+                   'where data_queue_column_name = ''Risk'' and '+
+                         'icastr <> '' '' '+
+                   'order by key2';
+
+         when Q5Quote;
+            SQLStatement =
+                'select group_name,icastr,icquest1,icquest2,icqstcon,CIID '+
+                   'from dqans inner join '+
+                        'imcovcde on Group_Name = icimdesc inner join '+
+                        'ci on cidsc = icimdesc '+
+                   'where data_queue_column_name = ''Risk''  and '+
+                         'icastr <> '' '' and '+
+                         'CITypCde like ''IM%'' and  '+
+                         'PolMnsId = ? '+
+                   'order by key2';
+       endsl;
+
+       exec sql prepare InlandMarine from :SQLStatement;
+
+       exec sql open InlMarCsr using :PolicyMnsId;
+
+       exec sql fetch InlMarCsr for 30 rows into :InlMarine;
+       if SQLCode < 0;
+         WriteSQLERR(Proc_Name:sqlcod:SqlState:
+                'fetch InlMarCsr for 30 rows into :InlMarine');
+         exec sql close InlMarCsr;
+         p_status = 'E';
+         p_errcode = 'SQLERRCODE';
+         p_message = GetMessage(p_errcode:' ');
+         exsr endprocess;
+       endif;
+       EntryCount = SqlErrD(3);
+       exec sql close InlMarCsr;
+
+       endsr;
+
+       //==============================================================
+       // Get answer to question - This one is if World wide is included
+       //==============================================================
+       begsr GetQuest1;
+
+       FieldAns = GetFieldVal(@Polid:InlMarine(i).UseCIID:0:0:' ':
+                        InlMarine(i).Description:'WorldCov':%char(RnwBegDt));
+       Answer1 = TextAns;
+
+       endsr;
+
+       //==============================================================
+       // Get answer to question - This one is if the inland marine is
+       // Sceduled.
+       //==============================================================
+       begsr GetQuest2;
+
+       FieldAns = GetFieldVal(@Polid:InlMarine(i).UseCIID:0:0:' ':
+                        InlMarine(i).Description:'Schedule':%char(RnwBegDt));
+       Answer2 = TextAns;
+
+       endsr;
+
+       //==============================================================
+       //Sample SR for writing DQs
+       //==============================================================
+       begsr writeDQ;
+
+       datalen    = %len(IMInfoDQ);
+       data       = IMInfodq;
+       keySuffix  = 'proposalIMInfo';
+
+       keylen     = 64;
+       key        = p_session + keySuffix;
+       callp(e) qsnddtaq(quenam:quelib:datalen:data:keylen:key);
+       if %error;
+         p_status  = 'E';
+         p_errcode = 'RPG0000003';
+         p_message = GetMessage(p_errcode:' ');
+         exsr endProcess;
+       endif;
+
+       endsr;
+
+       //==============================================================
+       //Sample SR for writing DQs
+       //==============================================================
+       begsr GetPolCIID;
+
+
+       exec sql
+         select ciid, CI.POLMNSID
+            into :PolicyCIID, :PolicyMnsId
+            from CI
+              inner join PolMns on
+                    PolMns.PolMnsId = CI.PolMnsId
+            where citypcde = 'Policy' and
+                polid = :@Polid and
+                PolMns.MnsSeq = 1;
+
+       if SQLCode <> 0;
+         WriteSQLERR(Proc_Name:sqlcod:SQLState:
+                     'select ciid, CI.POLMNSID into :CovPolicyId, CovPolMnsId '+
+                     'from CI inner join PolMns on PolMns.PolMnsId = '+
+                     'CI.PolMnsId where citypcde = ''Policy'' and polid = '+
+                     ':@Polid and PolMns.MnsSeq = 1;');
+         p_status = 'E';
+         p_errcode = 'SQLERRCODE';
+         p_message = GetMessage(p_errcode:' ');
+         exsr endprocess;
+       endif;
+
+       endsr;
+
+       //==============================================================
+       //Load parameter DS to program parm and exit
+       //==============================================================
+          begsr endProcess;
+
+          linkage = progParms;
+          return;
+
+          endsr;
+
+
+      /end-free
